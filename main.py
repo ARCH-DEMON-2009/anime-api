@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Query
+from fastapi import FastAPI, Query, Header, HTTPException
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi import APIRouter
@@ -7,6 +7,10 @@ from bs4 import BeautifulSoup
 import re
 import os
 from typing import Optional
+from dotenv import load_dotenv
+
+# ── Load environment variables ──
+load_dotenv()
 
 # ── App ────────────────────────────────────────────────────────────────────────
 app = FastAPI(
@@ -23,17 +27,23 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# On Render.com set API_PREFIX="" to serve at root (/search, /popular …).
-# On Replit keep the default "/anime-api" so the proxy can route correctly.
 API_PREFIX = os.environ.get("API_PREFIX", "/anime-api")
 router = APIRouter(prefix=API_PREFIX)
 
+# ── Authentication Key ──
+ANIME_BY_SHUVO = os.environ.get("ANIME_BY_SHUVO", "")
+
+def verify_key(x_api_key: Optional[str] = Header(None)):
+    """Verify API key from header"""
+    if not ANIME_BY_SHUVO:
+        # If no key is set, allow all requests (development mode)
+        return True
+    if not x_api_key or x_api_key != ANIME_BY_SHUVO:
+        raise HTTPException(status_code=401, detail="Invalid or missing API key")
+    return True
+
 BASE_URL = "https://animedekho.app"
 
-# Accept-Encoding intentionally omitted — requests will negotiate only
-# gzip/deflate (which it can decode natively).  Including "br" causes the
-# server to send Brotli-compressed data that requests cannot decompress
-# without the optional brotli package.
 HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -47,7 +57,6 @@ HEADERS = {
     "Upgrade-Insecure-Requests": "1",
 }
 
-
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
 def fetch_page(url: str) -> Optional[str]:
@@ -58,7 +67,6 @@ def fetch_page(url: str) -> Optional[str]:
     except Exception as e:
         print(f"[fetch_page ERROR] {url} → {type(e).__name__}: {e}")
         return None
-
 
 def parse_article(item) -> dict:
     """Extract rich metadata from a search/listing <article> element."""
@@ -97,7 +105,6 @@ def parse_article(item) -> dict:
         "type":           item_type,
     }
 
-
 def detect_server_type(src: str) -> str:
     src_lower = src.lower()
     if "youtube.com" in src_lower or "youtu.be" in src_lower:
@@ -115,7 +122,6 @@ def detect_server_type(src: str) -> str:
     if "ok.ru" in src_lower:
         return "ok.ru"
     return "embed"
-
 
 def extract_servers(html: str) -> list:
     """Return all video server iframes found on an episode page."""
@@ -152,7 +158,6 @@ def extract_servers(html: str) -> list:
 
     return servers
 
-
 # ── Routes ─────────────────────────────────────────────────────────────────────
 
 @router.get("/")
@@ -160,6 +165,7 @@ def root():
     return {
         "message": "AnimeDekho API v2.0 — running!",
         "prefix":  API_PREFIX or "(root)",
+        "authentication": "API key required in header: X-API-Key",
         "endpoints": {
             "GET /search?q=&page=&type=": "Search anime (page 1-10, type=anime|movie|cartoon)",
             "GET /anime/{slug}":          "Anime details + full episode list",
@@ -169,14 +175,17 @@ def root():
         },
     }
 
-
 @router.get("/search")
 def search_anime(
     q:    str           = Query(..., description="Anime name to search"),
     page: int           = Query(1, ge=1, le=10, description="Page number (each page has ~15 results)"),
     type: Optional[str] = Query(None, description="Filter by type: anime | movie | cartoon"),
+    api_key: Optional[str] = Header(None, alias="X-API-Key"),
 ):
-    # animedekho uses ?s= for search and /page/N/ for pagination
+    # Verify API key
+    if ANIME_BY_SHUVO and (not api_key or api_key != ANIME_BY_SHUVO):
+        return JSONResponse({"error": "Invalid or missing API key"}, status_code=401)
+    
     url = f"{BASE_URL}/?s={q}" if page == 1 else f"{BASE_URL}/page/{page}/?s={q}"
     html = fetch_page(url)
     if not html:
@@ -199,9 +208,15 @@ def search_anime(
         "results": results,
     }
 
-
 @router.get("/anime/{slug:path}")
-def get_anime_details(slug: str):
+def get_anime_details(
+    slug: str,
+    api_key: Optional[str] = Header(None, alias="X-API-Key"),
+):
+    # Verify API key
+    if ANIME_BY_SHUVO and (not api_key or api_key != ANIME_BY_SHUVO):
+        return JSONResponse({"error": "Invalid or missing API key"}, status_code=401)
+    
     url = f"{BASE_URL}/{slug}/"
     html = fetch_page(url)
     if not html:
@@ -209,21 +224,17 @@ def get_anime_details(slug: str):
 
     soup = BeautifulSoup(html, "html.parser")
 
-    # Title
     title_el = soup.find("h1")
     title = (title_el.get_text(strip=True) if title_el
              else slug.split("/")[-1].replace("-", " ").title())
 
-    # Description
     desc_el     = soup.find("div", class_="entry-content")
     description = desc_el.get_text(strip=True)[:600] if desc_el else None
 
-    # Cover image
     img_el = (soup.find("img", attrs={"post-id": True}) or
               soup.find("img", class_="wp-post-image"))
     image = img_el.get("src") if img_el else None
 
-    # Rich metadata from .bd sidebar block
     rating = views = duration = latest_ep_info = None
     genres: list = []
     bd = soup.find(class_="bd") or soup.find(class_="entry-meta")
@@ -235,7 +246,6 @@ def get_anime_details(slug: str):
         duration      = d_el.get_text(strip=True)  if d_el  else None
         latest_ep_info= ep_el.get_text(strip=True) if ep_el else None
 
-        # Genre list from <li class="rw sm"> that starts with "Genres"
         for li in bd.find_all("li"):
             text = li.get_text(separator=",", strip=True)
             if text.startswith("Genres"):
@@ -245,7 +255,6 @@ def get_anime_details(slug: str):
         views_m = re.search(r"([\d,]+)\s*Views", bd.get_text())
         views   = views_m.group(1) if views_m else None
 
-    # Episode list — links in the form /epi/{anime-slug}-{S}x{E}/
     episodes: list = []
     seen: set      = set()
     for a in soup.find_all("a", href=True):
@@ -279,11 +288,15 @@ def get_anime_details(slug: str):
         "episodes":       episodes[:100],
     }
 
-
 @router.get("/episode")
 def get_episode_servers(
     ep_url: str = Query(..., description="Episode URL (e.g. https://animedekho.app/epi/naruto-1x1/)"),
+    api_key: Optional[str] = Header(None, alias="X-API-Key"),
 ):
+    # Verify API key
+    if ANIME_BY_SHUVO and (not api_key or api_key != ANIME_BY_SHUVO):
+        return JSONResponse({"error": "Invalid or missing API key"}, status_code=401)
+    
     html = fetch_page(ep_url)
     if not html:
         return JSONResponse({"error": "Episode page not found"}, status_code=404)
@@ -296,7 +309,6 @@ def get_episode_servers(
             "servers": [],
         }, status_code=404)
 
-    # Prefer non-YouTube embeds for in-app playback; YouTube as fallback
     recommended = next((s for s in servers if s["type"] != "youtube"), servers[0])
 
     return {
@@ -306,9 +318,14 @@ def get_episode_servers(
         "recommended":  recommended,
     }
 
-
 @router.get("/popular")
-def get_popular():
+def get_popular(
+    api_key: Optional[str] = Header(None, alias="X-API-Key"),
+):
+    # Verify API key
+    if ANIME_BY_SHUVO and (not api_key or api_key != ANIME_BY_SHUVO):
+        return JSONResponse({"error": "Invalid or missing API key"}, status_code=401)
+    
     html = fetch_page(f"{BASE_URL}/category/anime/")
     if not html:
         return JSONResponse({"error": "Failed to fetch popular anime"}, status_code=500)
@@ -316,16 +333,20 @@ def get_popular():
     results = [parse_article(a) for a in soup.find_all("article") if a.find("a", href=True)]
     return {"popular": [r for r in results if r["title"]][:20]}
 
-
 @router.get("/recent")
-def get_recent():
+def get_recent(
+    api_key: Optional[str] = Header(None, alias="X-API-Key"),
+):
+    # Verify API key
+    if ANIME_BY_SHUVO and (not api_key or api_key != ANIME_BY_SHUVO):
+        return JSONResponse({"error": "Invalid or missing API key"}, status_code=401)
+    
     html = fetch_page(f"{BASE_URL}/category/hindi-dub/")
     if not html:
         return JSONResponse({"error": "Failed to fetch recent episodes"}, status_code=500)
     soup    = BeautifulSoup(html, "html.parser")
     results = [parse_article(a) for a in soup.find_all("article") if a.find("a", href=True)]
     return {"recent": [r for r in results if r["title"]][:20]}
-
 
 # ── Mount & run ────────────────────────────────────────────────────────────────
 app.include_router(router)
@@ -334,4 +355,8 @@ if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 8000))
     print(f"AnimeDekho API v2.0 starting on port {port}  prefix='{API_PREFIX}'")
+    if ANIME_BY_SHUVO:
+        print(f"🔐 API Key protection: ENABLED")
+    else:
+        print(f"⚠️  API Key protection: DISABLED (no key set)")
     uvicorn.run(app, host="0.0.0.0", port=port)
