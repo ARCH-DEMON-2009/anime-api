@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: animedekho-api
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    rootDir: python-api
+    envVars:
+      # Routes served at root on Render (e.g. /search, /popular)
+      - key: ANIME_BY_SHUVO
+        value: ""
+    healthCheckPath: /
