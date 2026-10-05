@@ -5,10 +5,11 @@ from bs4 import BeautifulSoup
 import os
 import requests
 from dotenv import load_dotenv
+from urllib.parse import urljoin, urlsplit
 
 load_dotenv()
 
-BASE_URL = "https://animedekho.app"
+BASE_URL = "https://animedekho.tv"
 API_KEY = os.getenv("API_KEY", "")
 ALLOWED_ORIGINS = [
     "https://animesenpai.in",
@@ -63,17 +64,18 @@ def parse_article(article):
     title_tag = article.find("h2") or article.find("h3")
     link_tag = article.find("a", href=True)
     image_tag = article.find("img")
-    href = link_tag.get("href", "") if link_tag else ""
+    href = urljoin(f"{BASE_URL}/", link_tag.get("href", "")) if link_tag else ""
+    path = urlsplit(href).path.strip("/")
 
     item_type = "anime"
-    if "movie" in href:
+    if "movie" in path:
         item_type = "movie"
-    elif "cartoon" in href:
+    elif "cartoon" in path:
         item_type = "cartoon"
 
     return {
         "title": title_tag.get_text(" ", strip=True) if title_tag else "",
-        "slug": href.replace(BASE_URL, "").strip("/"),
+        "slug": path,
         "url": href,
         "image": image_tag.get("src") if image_tag else None,
         "type": item_type,
@@ -164,7 +166,10 @@ def search_anime(
 def get_anime_details(slug: str, x_api_key: str | None = Header(default=None, alias="X-API-Key")):
     verify_api_key(x_api_key)
 
-    url = f"{BASE_URL}/{slug}/"
+    url = urljoin(f"{BASE_URL}/", slug.lstrip("/"))
+    if urlsplit(url).hostname != urlsplit(BASE_URL).hostname:
+        raise HTTPException(status_code=400, detail="Invalid anime slug")
+
     html = fetch_page(url)
     if not html:
         return JSONResponse({"error": "Anime not found"}, status_code=404)
@@ -206,6 +211,10 @@ def get_anime_details(slug: str, x_api_key: str | None = Header(default=None, al
 @app.get("/episode")
 def episode_detail(ep_url: str = Query(...), x_api_key: str | None = Header(default=None, alias="X-API-Key")):
     verify_api_key(x_api_key)
+
+    episode_host = urlsplit(ep_url)
+    if episode_host.scheme not in {"http", "https"} or episode_host.hostname != urlsplit(BASE_URL).hostname:
+        raise HTTPException(status_code=400, detail="Invalid episode URL")
 
     html = fetch_page(ep_url)
     if not html:
