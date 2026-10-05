@@ -13,6 +13,8 @@ API_KEY = os.getenv("API_KEY", "")
 ALLOWED_ORIGINS = [
     "https://animesenpai.in",
     "https://www.animesenpai.in",
+    "https://anime.shashanksv.com",
+    "https://www.anime.shashanksv.com",
     "http://localhost:3000",
     "http://localhost:5173",
     "http://127.0.0.1:3000",
